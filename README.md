@@ -101,7 +101,7 @@ Built in pure Rust `std` with zero external dependencies, `dnadec` bridges human
 ### Quick Start
 
 ```bash
-git clone https://github.com
+git clone https://github.com/umayl/dnadec.git
 cd dnadec
 cargo build --release
 
