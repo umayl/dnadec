@@ -1,0 +1,8 @@
+[package]
+name = "dnadec"
+version = "0.1.0"
+edition = "2021"
+description = "Zero-dependency, O(N) biophysical DNA decompiler for prokaryotic circuits and genomes"
+license = "MIT"
+keywords = ["bioinformatics", "compiler", "decompiler", "dna", "genomics"]
+categories = ["command-line-utilities", "science"]
