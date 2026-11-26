@@ -7,6 +7,22 @@ Look at a raw `.fasta` file and you see an unbroken wall of four letters: `A`, `
 
 The compiler pass-through is a chain of physical and structural sequence gates: promoter evidence opens a transcriptional unit; an initiation signal admits a start codon; an in-frame stop defines a callback; a terminator closes the unit. Later passes consume only evidence that survived earlier gates. `dnadec` is an experimental biophysical static analyzer, not a validated whole-genome annotator.
 
+```text
+raw .fasta (A, C, G, T)
+  │
+  ▼  Pass 0: Null Calibration (10x Altschul–Erickson dinucleotide shuffles)
+[ Genome-Specific Background Floors: Promoter q99, RBS q99, Hairpin ΔG q1 ]
+  │
+  ▼  Pass 1: Biophysical Sequence Gates & 5'-UTR Operator Scan
+[ Promoter (σ70/σ32) ─► RBS / Coupling ─► ORF (ATG..STOP) ─► Terminator (ΔG + poly-T) ]
+  │
+  ▼  Pass 2: CSR Dependency Slicing & Cycle Quarantine
+[ Shared Motifs ─► Feedback Loops ([LATCH]) ─► Unlinked Annotations (!lock_N) ]
+  │
+  ▼  Code Generation
+[ Lifted IR (--emit ir) | Guarded Rules (default) | Python (--emit python) | Verilog (--emit verilog) ]
+```
+
 # I. Architecture and Primitives
 
 `dnadec` operates in pure Rust `std` with zero external dependencies across linear sequence passes (`O(N + K log K)` time, where `N` is sequence length and `K ≪ N` is candidate frame count; `O(N)` space):
@@ -129,13 +145,13 @@ Built in pure Rust `std` with zero external dependencies, `dnadec` is evaluated 
   - **Gene detection (`IoU ≥ 0.90`):** **19.36% F1** (`17.36%` precision, `21.89%` recall; `971` matched genes)
   - **Gene detection (`IoU = 1.00`):** **17.29% F1** (`15.50%` precision, `19.55%` recall; `867` exact matches)
   - **Operator-site matching (`within 10 bp`):** **2.50% F1** (`4.61%` precision, `1.71%` recall; `1,020` predicted sites vs. `2,742` confirmed/strong references)
-  - **Signed regulatory edges:** **0** signed edges predicted against `4,057` confirmed/strong references (unlinked operators remain abstained `!lock_N` guards).
+  - **Signed regulatory edges:** **0** signed edges predicted against `4,057` confirmed/strong references (unlinked operators remain abstained `!lock_N` annotations).
 - **Synthetic benchmark (`benchmarks/synthetic_eval.py`):** Across `80` held-out synthetic constructs (`40` positive, `40` negative), `dnadec` achieved **59.79% gene F1** (`50.88%` precision, `72.50%` recall) and **72.44% operator-site F1** (`95.83%` precision, `58.23%` recall).
 
 ### Quick Start
 
 ```bash
-git clone https://github.com
+git clone https://github.com/umayl/dnadec.git
 cd dnadec
 cargo build --release
 
@@ -173,4 +189,4 @@ Because `dnadec` relies strictly on 1D sequence-intrinsic rules without external
 
 # Acknowledgements & Conceptual Independence
 
-The four-pass biophysical decompilation pipeline, transcriptional-unit closure rules, and CSR-to-scope control-flow mapping presented in `dnadec` were conceptualized and engineered independently in zero-dependency standard-library Rust. Standard biophysical primitives and thermodynamic parameters—including the Altschul–Erickson Eulerian dinucleotide shuffle, canonical prokaryotic consensus motifs (σ70, σ32, Shine–Dalgarno), and nearest-neighbor Watson–Crick base-pair stacking free energies (ΔG)—are implemented directly from established molecular biology and bioinformatics literature.
+The multi-pass biophysical decompilation pipeline, transcriptional-unit closure rules, and CSR-to-scope control-flow mapping presented in `dnadec` were conceptualized and engineered independently in zero-dependency standard-library Rust. Standard biophysical primitives and thermodynamic parameters—including the Altschul–Erickson Eulerian dinucleotide shuffle, canonical prokaryotic consensus motifs (σ70, σ32, Shine–Dalgarno), and nearest-neighbor Watson–Crick base-pair stacking free energies (ΔG)—are implemented directly from established molecular biology and bioinformatics literature.
