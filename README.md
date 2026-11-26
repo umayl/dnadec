@@ -7,8 +7,6 @@ Look at a raw `.fasta` file and you see an unbroken wall of four letters: `A`, `
 
 The compiler pass-through is a chain of physical and structural sequence gates: promoter evidence opens a transcriptional unit; an initiation signal admits a start codon; an in-frame stop defines a callback; a terminator closes the unit. Later passes consume only evidence that survived earlier gates. `dnadec` is an experimental biophysical static analyzer, not a validated whole-genome annotator.
 
----
-
 # I. Architecture and Primitives
 
 `dnadec` operates in pure Rust `std` with zero external dependencies across linear sequence passes (`O(N + K log K)` time, where `N` is sequence length and `K ≪ N` is candidate frame count; `O(N)` space):
@@ -18,7 +16,6 @@ The compiler pass-through is a chain of physical and structural sequence gates: 
 - **Transcriptional-Unit Closure:** Candidate rho-independent terminators evaluate inverted-repeat stems (`6..=12 bp`) and loops (`3..=8 bp`) using nearest-neighbor Watson–Crick base-pair stacking energies (`ΔG`) paired with a downstream poly-T tract (`≥ 4` Ts in an `8 bp` window). Default strict mode halts on unsupported read-through spans; `--non-strict` emits them with an explicit `[WARN: UNTERMINATED_READTHROUGH]` annotation.
 - **Unwrapped Circular Topology (`--circular`):** Circular plasmids and chromosomes are unrolled once (`seq + seq`), keeping all interval overlap math strictly linear across passes and deferring `% orig_len` until final `@span` emission.
 - **CSR Dependency Slicing & Scope Latches:** Pass 1 scans bounded promoter/5'-UTR neighborhoods (`-120..+25 bp`) for inverted-repeat operator candidates (`6..=10 bp` stems) and compresses identical adjacent hits into multiplicity terms (`*xN`) only when start coordinates lie within `35 bp`. Pass 2 traces shared local operator links (emitted with unknown regulatory sign `?` and `effect=unknown` unless resolved) and quarantines feedback cycles into `scope_N_loops [LATCH]`. Unresolved operator sites are explicitly surfaced as candidate cis-edges and unlinked operator lock annotations (`!lock_N(...)`) rather than inferred boolean repressors.
----
 
 # II. Case Study: Synthetic Toggle Fixture
 
@@ -115,8 +112,6 @@ assign gene_1 = promoter_sigma70 & rbs; // @span: 1048..1750 (+)
 // UNLINKED_OPERATOR_LOCKS: !lock_0(GATATATATATC*x1)
 ```
 
----
-
 # III. Emergent Circuit Logic
 
 - **Implicit Boolean Conjunction (`AND`) with Honest Operator Abstention:** Verified cis-initiation dependencies surviving the sequence gates within the same 5' CSR slice form a conjunction (`AND` / `&`), whereas unlinked operator palindromes (`CANDIDATE_OPERATOR_SITES`, `CANDIDATE_CIS_EDGES`, `UNLINKED_OPERATOR_LOCKS`) are emitted as explicit metadata annotations rather than unverified boolean `NOT` gates.
@@ -163,8 +158,6 @@ python benchmarks/regulondb_eval.py
 ./target/release/dnadec wild_contig.fasta --non-strict
 ```
 
----
-
 # V. Biological Boundaries and Future Work
 
 Because `dnadec` relies strictly on 1D sequence-intrinsic rules without external proteome context, clear physical boundaries define its current scope:
@@ -174,14 +167,10 @@ Because `dnadec` relies strictly on 1D sequence-intrinsic rules without external
 - **Analytical Null Calibration:** Replacing the `10`-sample Monte Carlo dinucleotide shuffle with an exact first-order Markov transition expectation (`4×4` dinucleotide matrix) is a natural next step to eliminate sampling variance and cut full-genome runtime to under a second.
 - **Prokaryotic Scope:** Eukaryotic genomes—characterized by intron splicing, chromatin accessibility, and distal enhancers—fall outside linear prokaryotic coordinate scanning.
 
----
-
 # VI. Conclusion
 
 `dnadec` demonstrates how deterministic 1D sequence intervals can be lifted into a structured CSR/scope intermediate representation and lowered into multi-target circuit code without trained statistical models—while empirically mapping the boundary where 1D sequence physics stops and 3D cellular/proteome context begins.
 
----
-
 # Acknowledgements & Conceptual Independence
 
-The four-pass biophysical decompilation pipeline, transcriptional-unit closure rules, and CSR-to-scope control-flow mapping presented in `dnadec` were conceptualized and engineered independently from first principles in zero-dependency standard-library Rust.
+The four-pass biophysical decompilation pipeline, transcriptional-unit closure rules, and CSR-to-scope control-flow mapping presented in `dnadec` were conceptualized and engineered independently in zero-dependency standard-library Rust. Standard biophysical primitives and thermodynamic parameters—including the Altschul–Erickson Eulerian dinucleotide shuffle, canonical prokaryotic consensus motifs (σ70, σ32, Shine–Dalgarno), and nearest-neighbor Watson–Crick base-pair stacking free energies (ΔG)—are implemented directly from established molecular biology and bioinformatics literature.
