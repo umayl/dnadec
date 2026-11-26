@@ -1,35 +1,29 @@
 **Author:** Oladapo Oyelaja  
-**Date:** 24 November 2026  
+**Date:** 25 November 2026  
 
-# A Deterministic Biophysical Trans-Decompiler for Prokaryotic Genomes (`dnadec`)
+# `dnadec`: A Deterministic DNA-to-IR Prototype
 
-Look at a raw `.fasta` file and you see an unbroken wall of four letters: `A`, `T`, `C`, and `G`. For decades, computational biology has treated that string as an evolutionary puzzle best solved through probability—training Hidden Markov Models, codon-bias matrices, and deep neural networks to infer where genes sit. Those tools output flat coordinate tables, telling you *where* open reading frames are located while leaving the underlying program completely opaque.
+Look at a raw `.fasta` file and you see an unbroken wall of four letters: `A`, `T`, `C`, and `G`. Many established gene-prediction pipelines use statistical models to rank candidate features. `dnadec` explores an alternative deterministic sequence-rule approach—reducing a DNA strand to ordered spatial intervals and lifting sequence gates into an intermediate representation (IR) without trained weights or species databases.
 
-Strip away the Latin nomenclature and reduce a DNA strand to its bare physical events along a coordinate axis: `x1, x2_start, x2_end, x3_start, x4_end`. When you examine a prokaryotic genome purely as ordered spatial intervals governed by nearest-neighbor base-pairing thermodynamics (ΔG), a structured hierarchy emerges directly from the sequence. From those flat coordinates alone, you can deterministically derive the **unknowns** (upstream promoters, Shine–Dalgarno sites, and operator palindromes), isolate the **callbacks** (expressed reading frames), trace their **dependencies** (bounded intergenic switch slices), and reconstruct the **broader control flow** of the circuit—nested conditional guards, polycistronic operons, and local or motif-linked feedback latches.
-
-Once higher-level control flow falls straight out of raw coordinate intervals without trained statistical models or arbitrary energy thresholds, the abstraction becomes clear: a prokaryotic genome behaves as **thermodynamic bytecode**—and lifting its static logic does not require machine learning. It requires a decompiler.
+The compiler pass-through is a chain of physical and structural sequence gates: promoter evidence opens a transcriptional unit; an initiation signal admits a start codon; an in-frame stop defines a callback; a terminator closes the unit. Later passes consume only evidence that survived earlier gates. `dnadec` is an experimental biophysical static analyzer, not a validated whole-genome annotator.
 
 ---
 
 # I. Architecture and Primitives
 
-`dnadec` lifts raw nucleotide sequences into a structured Intermediate Representation (IR) across four linear-scan passes (`O(N + K log K)` time, where `N` is sequence length and `K ≪ N` is candidate frame count; `O(N)` space), deriving energy baselines directly from sequence physics:
+`dnadec` operates in pure Rust `std` with zero external dependencies across linear sequence passes (`O(N + K log K)` time, where `N` is sequence length and `K ≪ N` is candidate frame count; `O(N)` space):
 
-- **Self-Calibrating Noise Floor (Altschul–Erickson Dinucleotide Shuffle):** Rather than relying on hardcoded ΔG cutoffs that break across AT-rich and GC-rich organisms, Pass 0 constructs a 4-node Eulerian graph (`A, C, G, T`) with a locked final-edge spanning tree and deterministically shuffles the sequence (`seed = 42`). Scoring the physical motif scanners against this chemically identical decoy derives the genome's own ΔG background ceiling automatically.
-- **Transcriptional Units (`[Promoter .. Terminator]`):** A promoter (σ70 or σ32) opens a continuous transcriptional span that remains active across downstream stop codons until closed by a rho-independent hairpin terminator (`stem: 6..=12 bp`, `loop: 3..=8 bp`, trailing `TTTT` tract).
-  - In **Default (Strict) Mode**, any promoter lacking a closing downstream terminator fails compilation as an unterminated read-through error.
-  - Under **`--non-strict`**, open or Rho-terminated transcripts compile with an explicit `[WARN: UNTERMINATED_READTHROUGH]` annotation.
-- **Callbacks & Translational Coupling:** Inside an open transcriptional unit, `START` (`ATG`/`GTG`/`TTG`) → `STOP` (`TAA`/`TAG`/`TGA`) callbacks initiate via either a Shine–Dalgarno `RBS` (`4..=15 bp` upstream), a leaderless `+1` transcription start (`5..=9 bp` downstream of the `-10` box), or a `1..=4 bp` `TGATG` translational overlap (`coupled(gene_i)`).
+- **Multi-Shuffle Null Calibration (Altschul–Erickson Dinucleotide Shuffle):** Pass 0 constructs a 4-node Eulerian graph (`A, C, G, T`) with a locked final-edge spanning tree and runs `10` deterministic dinucleotide-preserving shuffles (`seed = 42`) to establish genome-specific background floors for promoter match counts, RBS match counts, and hairpin stem free energies. Inputs too short to form a valid shuffle or yielding zero null candidates are explicitly reported as uncalibrated (`None`) rather than falling back to hardcoded floors.
+- **Promoter and Initiation Gates:** σ70 (`TTGACA` / `TATAAT`, spacer `16..=18 bp`) and σ32 (`CTTGAA` / `CCCCAT`, spacer `13..=17 bp`) boxes require at least `4/6` matches per box. Shine–Dalgarno RBS scoring requires at least `4/6` matches to `AGGAGG` at `4..=15 bp` upstream of a start codon (`ATG`/`GTG`/`TTG`). Callbacks require an in-frame `STOP` (`TAA`/`TAG`/`TGA`) and a minimum coding span of `30 bp` (10 codons), or `1..=4 bp` translational overlap (`coupled(gene_i)`), or leaderless spacing (`5..=9 bp` downstream of the `-10` box).
+- **Transcriptional-Unit Closure:** Candidate rho-independent terminators evaluate inverted-repeat stems (`6..=12 bp`) and loops (`3..=8 bp`) using nearest-neighbor Watson–Crick base-pair stacking energies (`ΔG`) paired with a downstream poly-T tract (`≥ 4` Ts in an `8 bp` window). Default strict mode halts on unsupported read-through spans; `--non-strict` emits them with an explicit `[WARN: UNTERMINATED_READTHROUGH]` annotation.
 - **Unwrapped Circular Topology (`--circular`):** Circular plasmids and chromosomes are unrolled once (`seq + seq`), keeping all interval overlap math strictly linear across passes and deferring `% orig_len` until final `@span` emission.
-- **CSR Dependency Slicing & Scope Latches:** Pass 1 extracts the upstream unknowns (`promoter`, `!lock_N` operator palindromes, and `RBS`) bounding each winning callback into a flat Compressed Sparse Row (`CSR`) dependency array (`callback_dependencies`) and collapses tandem repeats into multiplicity factors (`*xN`). Pass 2 walks backward from terminal callbacks (`callback_scope_0`) to layer known regulatory edges (`callback_scope_1..N`) and quarantines active-path feedback cycles into `callback_scope_N_loops [LATCH]`.
+- **CSR Dependency Slicing & Scope Latches:** Pass 1 scans bounded promoter/5'-UTR neighborhoods (`-120..+25 bp`) for inverted-repeat operator candidates (`6..=10 bp` stems) and compresses identical adjacent hits into multiplicity terms (`*xN`) only when start coordinates lie within `35 bp`. Pass 2 traces shared local operator links (emitted with unknown regulatory sign unless resolved) and quarantines feedback cycles into `scope_N_loops [LATCH]`. Unlinked operator sites remain isolated as `!lock_N` guards.
 
 ---
 
-# II. Case Study: Gardner Bistable Toggle Switch (Trans-Decompilation)
+# II. Case Study: Synthetic Toggle Fixture
 
-Because Passes 0 through 2 lower raw nucleotide coordinates into a **domain-agnostic Intermediate Representation (IR)**—consisting of flat CSR dependency slices, topological callback scopes, and quarantined feedback latches—`dnadec` operates as a **trans-decompiler**. Once the `.fasta` input is lifted into the Scope/CSR IR, the final emission pass can target any imperative, hardware-description, or formal logic language without re-scanning the genome.
-
-Given a raw `.fasta` sequence encoding a mutual-repression toggle switch (`gene_0` repressing `gene_1`, and `gene_1` repressing `gene_0` via a 3x tandem operator array):
+Passes 0 through 2 lower sequence coordinates into a structured Intermediate Representation of callback dependencies and feedback cycles, supporting structured text (`default`), `ir`, `python`, and `verilog` emitters.
 
 ```bash
 dnadec fixtures/toggle_switch.fasta
@@ -38,12 +32,17 @@ dnadec fixtures/toggle_switch.fasta
 ### 1. Lifted Scope / CSR Intermediate Representation (`--emit ir`)
 
 ```text
-IR_MODULE toggle_switch {
+IR_MODULE fixtures/toggle_switch.fasta {
+  REGULATORY_EDGE gene_0 -- gene_1 [motif=TTACTAGA*x1]
+  REGULATORY_EDGE gene_1 -- gene_0 [motif=TCCCTATC*x3]
+  CANDIDATE_OPERATOR_SITE gene_0 motif=TCCCTATC span=84..92 strand=+
+  CANDIDATE_OPERATOR_SITE gene_0 motif=TCCCTATC span=92..100 strand=+
+  CANDIDATE_OPERATOR_SITE gene_0 motif=TCCCTATC span=100..108 strand=+
   CALLBACK_SCOPE_0_LOOPS [LATCH]:
     CALLBACK gene_0 @span(170..872, '+')
       DEPENDS_ALL [ promoter_sigma70(x1), NOT lock(TCCCTATC)(x3), RBS(x1) ]
       EMIT gene_0
-
+  CANDIDATE_OPERATOR_SITE gene_1 motif=TTACTAGA span=948..956 strand=+
   CALLBACK_SCOPE_1:
     CALLBACK gene_1 @span(1032..1734, '+')
       DEPENDS_ALL [ promoter_sigma70(x1), NOT lock(TTACTAGA)(x1), RBS(x1) ]
@@ -51,9 +50,7 @@ IR_MODULE toggle_switch {
 }
 ```
 
-### 2. Multi-Target Code Emission (Trans-Decompilation)
-
-From that single lifted IR, backend emitters lower the genetic circuit directly into arbitrary target languages:
+### 2. Multi-Target Emitter Examples
 
 #### Default Structured Output (`--emit default`)
 ```rust
@@ -61,42 +58,44 @@ scope_0_loops [LATCH]: if (promoter_sigma70*x1, !lock(TCCCTATC)*x3, RBS*x1) { em
 scope_1: if (promoter_sigma70*x1, !lock(TTACTAGA)*x1, RBS*x1) { emit(gene_1); } // @span: 1032..1734 (+)
 ```
 
-#### Target A: Executable Python Simulation (`--emit python`)
+#### Python-Style Output (`--emit python`)
 ```python
-# Trans-decompiled from toggle_switch.fasta
+# Trans-decompiled by dnadec from fixtures/toggle_switch.fasta
 while circuit_active:  # scope_0_loops [LATCH]
-    if promoter_sigma70 and (not lock_TCCCTATC >= 3) and rbs:
-        gene_0 = emit("gene_0")  # @span: 170..872 (+)
-    if promoter_sigma70 and (not lock_TTACTAGA) and rbs:
-        gene_1 = emit("gene_1")  # @span: 1032..1734 (+)
+    if promoter_sigma70 and not lock_TCCCTATC >= 3 and rbs:  # @span: 170..872 (+)
+        gene_0 = emit("gene_0")
+    if promoter_sigma70 and not lock_TTACTAGA >= 1 and rbs:  # @span: 1032..1734 (+)
+        gene_1 = emit("gene_1")
 ```
 
-#### Target B: Hardware Description (`--emit verilog`)
+#### Verilog-Style Output (`--emit verilog`)
 ```verilog
-// Trans-decompiled hardware gate equivalent
-assign gene_0 = promoter_sigma70 & ~(lock_TCCCTATC_x3) & rbs; // latch feedback
-assign gene_1 = promoter_sigma70 & ~(lock_TTACTAGA)    & rbs;
+// Trans-decompiled by dnadec from fixtures/toggle_switch.fasta
+assign gene_0 = promoter_sigma70 & ~(lock_TCCCTATC_x3) & rbs; // @span: 170..872 (+) // latch feedback
+assign gene_1 = promoter_sigma70 & ~(lock_TTACTAGA_x1) & rbs; // @span: 1032..1734 (+)
 ```
 ---
 
 # III. Emergent Circuit Logic
 
-Several emergent compiler behaviors appear directly in the decompiled output above:
-
-- **Implicit Boolean Conjunction (`AND`) and Steric Negation (`NOT`):** Every unknown residing within the same 5' UTR CSR slice must be satisfied simultaneously for RNA polymerase and the ribosome to trigger the downstream callback, naturally forming an `AND` guard where bound repressor palindromes act as steric `NOT` gates (`!lock(...)`).
-- **Tandem Repeat Compression:** Adjacent identical palindromes upstream of `gene_0` are collapsed during Pass 1's sliding-window deduplication into a single cooperative multiplicity term (`!lock(TCCCTATC)*x3`), reducing CSR memory footprint without losing binding stoichiometry.
-- **Feedback Cycle Quarantine (`[LATCH]`):** During Pass 2's backward depth-first traversal, maintaining an `active_path` recursion stack detects bidirectional repression cycles and isolates them into `scope_0_loops [LATCH]` rather than emitting an invalid acyclic tree.
-- **Operon & Coupling Propagation:** In polycistronic transcripts sharing one upstream promoter and one downstream terminator, downstream callbacks emit clean `if (RBS*x1)` or `if (coupled(gene_0))` guards without requiring synthetic internal promoters.
+- **Implicit Boolean Conjunction (`AND`) and Steric Negation (`NOT`):** Dependencies surviving the sequence gates within the same 5' CSR slice form a conjunction (`AND`), while candidate operator palindromes emit as steric `!lock(...)` guards.
+- **Spatial Tandem Repeat Compression:** Identical adjacent operator hits within `35 bp` collapse into a single multiplicity term (`!lock(TCCCTATC)*x3`), while separated sites remain distinct entries.
+- **Feedback Cycle Quarantine (`[LATCH]`):** During Pass 2's backward depth-first traversal, an `active_path` recursion stack detects bidirectional feedback cycles and isolates them into `scope_0_loops [LATCH]`.
+- **Operon & Coupling Propagation:** Downstream callbacks inside polycistronic transcripts sharing one upstream promoter and one downstream terminator emit clean `if (RBS*x1)` or `if (coupled(gene_0))` guards without requiring internal promoters.
 
 ---
 
-# IV. Complexity, Scaling, and Usage
+# IV. Benchmarks, Scaling, and Usage
 
-Built in pure Rust `std` with zero external dependencies, `dnadec` bridges human-readable circuit inspection and high-throughput static analysis:
+Built in pure Rust `std` with zero external dependencies, `dnadec` is evaluated against both synthetic constructs and the full *Escherichia coli* K-12 reference genome (`NC_000913.3`, `4,641,652 bp`):
 
-- **Linear Sequence Scaling (`O(N)` Space, `O(N + K log K)` Time):** Every pass executes via linear scans, bounded physical windows, sweep-line interval sorting over `K` candidates, and contiguous CSR arrays (~80–110 bytes/bp), allowing full bacterial chromosomes to compile in tens of milliseconds on commodity hardware.
-- **Zero Trained Weights or Species Databases:** Because thermodynamic stability (ΔG) and dinucleotide self-calibration derive directly from the input sequence, `dnadec` analyzes novel bacteriophages, unannotated metagenomic contigs, and synthetic plasmids without pre-trained HMMs.
-- **Compile-Time Circuit Linting:** Treating unclosed transcripts as hard errors by default brings static verification discipline to synthetic plasmid design prior to DNA synthesis.
+- **Wild-genome benchmark (`benchmarks/regulondb_eval.py`):** On the `4,641,652 bp` *E. coli* K-12 chromosome, the release build achieved a log-log linear scaling exponent of **`0.981`** with a median runtime of **`25.19 s`** in non-strict mode (including `10` full-genome dinucleotide shuffles). Strict mode exited with status `1` due to unclosed read-through spans. In non-strict mode (5,594 predicted ORFs vs. 4,435 RegulonDB references):
+  - **Gene detection (`IoU ≥ 0.50`):** **26.86% F1** (`24.08%` precision, `30.37%` recall; `1,347` matched genes)
+  - **Gene detection (`IoU ≥ 0.90`):** **19.36% F1** (`17.36%` precision, `21.89%` recall; `971` matched genes)
+  - **Gene detection (`IoU = 1.00`):** **17.29% F1** (`15.50%` precision, `19.55%` recall; `867` exact matches)
+  - **Operator-site matching (`within 10 bp`):** **2.50% F1** (`4.61%` precision, `1.71%` recall; `1,020` predicted sites vs. `2,742` confirmed/strong references)
+  - **Signed regulatory edges:** **0** signed edges predicted against `4,057` confirmed/strong references (unlinked operators remain abstained `!lock_N` guards).
+- **Synthetic benchmark (`benchmarks/synthetic_eval.py`):** Across `80` held-out synthetic constructs (`40` positive, `40` negative), `dnadec` achieved **59.79% gene F1** (`50.88%` precision, `72.50%` recall) and **72.44% operator-site F1** (`95.83%` precision, `58.23%` recall).
 
 ### Quick Start
 
@@ -111,33 +110,37 @@ cargo build --release
 # Decompile a circular plasmid (handles genes split across index 0)
 ./target/release/dnadec plasmid.fasta --circular
 
-# Trans-decompile to IR, Python, or Verilog HDL
+# Emit IR, Python, or Verilog HDL
 ./target/release/dnadec fixtures/toggle_switch.fasta --emit ir
 ./target/release/dnadec fixtures/toggle_switch.fasta --emit python
 ./target/release/dnadec fixtures/toggle_switch.fasta --emit verilog
 
+# Run synthetic and RegulonDB genome benchmarks
+python benchmarks/synthetic_eval.py
+python benchmarks/regulondb_eval.py
+
 # Permit Rho-terminated or partial contigs with inline warnings
 ./target/release/dnadec wild_contig.fasta --non-strict
 ```
-
 ---
 
 # V. Biological Boundaries and Future Work
 
-Because `dnadec` relies strictly on sequence-intrinsic physical thermodynamics without external proteome context, several biological boundaries define its current scope:
+Because `dnadec` relies strictly on 1D sequence-intrinsic rules without external proteome context, clear physical boundaries define its current scope:
 
-- **Protein-Assisted Regulation:** Wild bacterial operons that rely on external activator proteins (`CRP`, `AraC`) to rescue weak `-35` promoter boxes, or **Rho helicase** to terminate unstructured transcripts without a hairpin, cannot be resolved from DNA folding energy alone without `--non-strict` mode.
-- **Trans-Acting Repressor Resolution:** While `dnadec` deterministically identifies operator palindromes (`!lock(...)`), linking an unannotated palindrome to a specific trans-acting repressor protein encoded elsewhere on the chromosome requires known motif dictionaries or structural protein–DNA docking; unknown operators remain isolated as unlinked steric guards (`!lock_N`).
-- **Prokaryotic Scope:** Eukaryotic genomes—characterized by intron splicing, chromatin accessibility, and distal enhancers tens of kilobases away—fall outside linear prokaryotic coordinate scanning.
+- **Protein-Assisted & Non-Canonical Regulation:** Wild bacterial operons relying on external activator proteins (`CRP`, `AraC`) to rescue weak `-35` boxes, non-Shine–Dalgarno initiation, or **Rho helicase** termination without a hairpin cannot be resolved from 1D sequence geometry alone.
+- **Trans-Acting Repressor Identity:** While `dnadec` identifies inverted-repeat operator candidates (`!lock(...)`), linking an unannotated palindrome to a trans-acting repressor encoded elsewhere on the chromosome—or determining activation vs. repression sign—cannot be established from a 1D DNA palindrome alone; unknown sites remain isolated as unlinked `!lock_N` guards.
+- **Analytical Null Calibration:** Replacing the `10`-sample Monte Carlo dinucleotide shuffle with an exact first-order Markov transition expectation (`4×4` dinucleotide matrix) is a natural next step to eliminate sampling variance and cut full-genome runtime to under a second.
+- **Prokaryotic Scope:** Eukaryotic genomes—characterized by intron splicing, chromatin accessibility, and distal enhancers—fall outside linear prokaryotic coordinate scanning.
 
 ---
 
 # VI. Conclusion
 
-Treating DNA solely through opaque statistical models obscures the clean, deterministic control flow governing prokaryotic genetic circuits. By reducing raw nucleotide strings to physical coordinate intervals and deriving unknowns, callbacks, dependencies, and feedback latches through nearest-neighbor thermodynamics and self-calibrating dinucleotide backgrounds, `dnadec` lifts prokaryotic genomes into a universal intermediate representation ready for multi-target trans-decompilation in linear time.
+`dnadec` demonstrates how deterministic 1D sequence intervals can be lifted into a structured CSR/scope intermediate representation and lowered into multi-target circuit code without trained statistical models—while empirically mapping the boundary where 1D sequence physics stops and 3D cellular/proteome context begins.
 
 ---
 
 # Acknowledgements & Conceptual Independence
 
-The four-pass biophysical decompilation pipeline, transcriptional-unit closure rules, and CSR-to-scope control-flow mapping presented in `dnadec` were conceptualized and engineered independently from first principles. Rather than adapting existing statistical gene-prediction heuristics or machine-learning classifiers, the system was built from scratch in standard-library Rust by deriving control-flow structure directly from physical sequence intervals.
+The four-pass biophysical decompilation pipeline, transcriptional-unit closure rules, and CSR-to-scope control-flow mapping presented in `dnadec` were conceptualized and engineered independently from first principles in zero-dependency standard-library Rust.

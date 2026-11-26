@@ -2,7 +2,7 @@
 name = "dnadec"
 version = "0.1.0"
 edition = "2021"
-description = "Zero-dependency, O(N) biophysical DNA decompiler for prokaryotic circuits and genomes"
+description = "Zero-dependency deterministic DNA-to-IR prototype"
 license = "MIT"
 keywords = ["bioinformatics", "compiler", "decompiler", "dna", "genomics"]
 categories = ["command-line-utilities", "science"]
