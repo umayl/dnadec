@@ -13,12 +13,11 @@ The compiler pass-through is a chain of physical and structural sequence gates: 
 
 `dnadec` operates in pure Rust `std` with zero external dependencies across linear sequence passes (`O(N + K log K)` time, where `N` is sequence length and `K ≪ N` is candidate frame count; `O(N)` space):
 
-- **Multi-Shuffle Null Calibration (Altschul–Erickson Dinucleotide Shuffle):** Pass 0 constructs a 4-node Eulerian graph (`A, C, G, T`) with a locked final-edge spanning tree and runs `10` deterministic dinucleotide-preserving shuffles (`seed = 42`) to establish genome-specific background floors for promoter match counts, RBS match counts, and hairpin stem free energies. Inputs too short to form a valid shuffle or yielding zero null candidates are explicitly reported as uncalibrated (`None`) rather than falling back to hardcoded floors.
-- **Promoter and Initiation Gates:** σ70 (`TTGACA` / `TATAAT`, spacer `16..=18 bp`) and σ32 (`CTTGAA` / `CCCCAT`, spacer `13..=17 bp`) boxes require at least `4/6` matches per box. Shine–Dalgarno RBS scoring requires at least `4/6` matches to `AGGAGG` at `4..=15 bp` upstream of a start codon (`ATG`/`GTG`/`TTG`). Callbacks require an in-frame `STOP` (`TAA`/`TAG`/`TGA`) and a minimum coding span of `30 bp` (10 codons), or `1..=4 bp` translational overlap (`coupled(gene_i)`), or leaderless spacing (`5..=9 bp` downstream of the `-10` box).
+- **Multi-Shuffle Null Calibration (Altschul–Erickson Dinucleotide Shuffle):** Pass 0 constructs a 4-node Eulerian graph (`A, C, G, T`) with a locked final-edge spanning tree and runs `10` deterministic dinucleotide-preserving shuffles (`seeds 42..51`) to establish genome-specific background floors for promoter match counts (`q99`), RBS match counts (`q99`), and hairpin stem free energies (`ΔG q1` lower tail). Inputs too short to form a valid shuffle or yielding zero null candidates are explicitly reported as uncalibrated (`Uncalibrated ...: zero valid null-model hits`) rather than falling back to hardcoded floors.
+- **Promoter and Initiation Gates:** σ70 (`TTGACA` / `TATAAT`, spacer `16..=18 bp`) and σ32 (`CTTGAA` / `CCCCAT`, spacer `13..=17 bp`) boxes require at least `4/6` matches per box (or higher if raised by Pass 0 calibration). Shine–Dalgarno RBS scoring requires at least `4/6` matches to `AGGAGG` at `4..=15 bp` upstream of a start codon (`ATG`/`GTG`/`TTG`). Callbacks require an in-frame `STOP` (`TAA`/`TAG`/`TGA`) and a minimum coding span of `30 bp` (10 codons), or `1..=4 bp` translational overlap (`coupled(gene_i)`), or leaderless spacing (`5..=9 bp` downstream of the `-10` box).
 - **Transcriptional-Unit Closure:** Candidate rho-independent terminators evaluate inverted-repeat stems (`6..=12 bp`) and loops (`3..=8 bp`) using nearest-neighbor Watson–Crick base-pair stacking energies (`ΔG`) paired with a downstream poly-T tract (`≥ 4` Ts in an `8 bp` window). Default strict mode halts on unsupported read-through spans; `--non-strict` emits them with an explicit `[WARN: UNTERMINATED_READTHROUGH]` annotation.
 - **Unwrapped Circular Topology (`--circular`):** Circular plasmids and chromosomes are unrolled once (`seq + seq`), keeping all interval overlap math strictly linear across passes and deferring `% orig_len` until final `@span` emission.
-- **CSR Dependency Slicing & Scope Latches:** Pass 1 scans bounded promoter/5'-UTR neighborhoods (`-120..+25 bp`) for inverted-repeat operator candidates (`6..=10 bp` stems) and compresses identical adjacent hits into multiplicity terms (`*xN`) only when start coordinates lie within `35 bp`. Pass 2 traces shared local operator links (emitted with unknown regulatory sign unless resolved) and quarantines feedback cycles into `scope_N_loops [LATCH]`. Unlinked operator sites remain isolated as `!lock_N` guards.
-
+- **CSR Dependency Slicing & Scope Latches:** Pass 1 scans bounded promoter/5'-UTR neighborhoods (`-120..+25 bp`) for inverted-repeat operator candidates (`6..=10 bp` stems) and compresses identical adjacent hits into multiplicity terms (`*xN`) only when start coordinates lie within `35 bp`. Pass 2 traces shared local operator links (emitted with unknown regulatory sign `?` and `effect=unknown` unless resolved) and quarantines feedback cycles into `scope_N_loops [LATCH]`. Unresolved operator sites are explicitly surfaced as candidate cis-edges and unlinked operator lock annotations (`!lock_N(...)`) rather than inferred boolean repressors.
 ---
 
 # II. Case Study: Synthetic Toggle Fixture
@@ -32,20 +31,31 @@ dnadec fixtures/toggle_switch.fasta
 ### 1. Lifted Scope / CSR Intermediate Representation (`--emit ir`)
 
 ```text
+Null calibration: 10 dinucleotide shuffles, seeds 42..51; match-count q99, ΔG q1 lower tail
+Calibrated sigma70 promoter: 6
+Calibrated sigma32 promoter: 6
+Calibrated RBS: 4
+Uncalibrated terminator ΔG: zero valid null-model hits
 IR_MODULE fixtures/toggle_switch.fasta {
-  REGULATORY_EDGE gene_0 -- gene_1 [motif=TTACTAGA*x1]
-  REGULATORY_EDGE gene_1 -- gene_0 [motif=TCCCTATC*x3]
-  CANDIDATE_OPERATOR_SITE gene_0 motif=TCCCTATC span=84..92 strand=+
-  CANDIDATE_OPERATOR_SITE gene_0 motif=TCCCTATC span=92..100 strand=+
-  CANDIDATE_OPERATOR_SITE gene_0 motif=TCCCTATC span=100..108 strand=+
+  REGULATORY_EDGE gene_0 ? gene_1 [motif=GATATATATATC*x1; effect=unknown]
+  REGULATORY_EDGE gene_1 ? gene_0 [motif=GATATATATATC*x3; effect=unknown]
+  CANDIDATE_OPERATOR_SITE gene_0 motif=GATATATATATC span=84..96 strand=+
+  CANDIDATE_OPERATOR_SITE gene_0 motif=GATATATATATC span=96..108 strand=+
+  CANDIDATE_OPERATOR_SITE gene_0 motif=GATATATATATC span=108..120 strand=+
   CALLBACK_SCOPE_0_LOOPS [LATCH]:
-    CALLBACK gene_0 @span(170..872, '+')
-      DEPENDS_ALL [ promoter_sigma70(x1), NOT lock(TCCCTATC)(x3), RBS(x1) ]
+    CALLBACK gene_0 @span(182..884, '+')
+    CANDIDATE_OPERATOR_SITES [ GATATATATATC*x3 ]
+    CANDIDATE_CIS_EDGES [ operator_site(GATATATATATC*x3) -> gene_0 [regulator=unknown, effect=unknown] ]
+    UNLINKED_OPERATOR_LOCKS [ !lock_0(GATATATATATC*x3) ]
+      DEPENDS_ALL [ promoter_sigma70(x1), RBS(x1) ]
       EMIT gene_0
-  CANDIDATE_OPERATOR_SITE gene_1 motif=TTACTAGA span=948..956 strand=+
+  CANDIDATE_OPERATOR_SITE gene_1 motif=GATATATATATC span=959..971 strand=+
   CALLBACK_SCOPE_1:
-    CALLBACK gene_1 @span(1032..1734, '+')
-      DEPENDS_ALL [ promoter_sigma70(x1), NOT lock(TTACTAGA)(x1), RBS(x1) ]
+    CALLBACK gene_1 @span(1048..1750, '+')
+    CANDIDATE_OPERATOR_SITES [ GATATATATATC*x1 ]
+    CANDIDATE_CIS_EDGES [ operator_site(GATATATATATC*x1) -> gene_1 [regulator=unknown, effect=unknown] ]
+    UNLINKED_OPERATOR_LOCKS [ !lock_0(GATATATATATC*x1) ]
+      DEPENDS_ALL [ promoter_sigma70(x1), RBS(x1) ]
       EMIT gene_1
 }
 ```
@@ -54,35 +64,65 @@ IR_MODULE fixtures/toggle_switch.fasta {
 
 #### Default Structured Output (`--emit default`)
 ```rust
-scope_0_loops [LATCH]: if (promoter_sigma70*x1, !lock(TCCCTATC)*x3, RBS*x1) { emit(gene_0); } // @span: 170..872 (+)
-scope_1: if (promoter_sigma70*x1, !lock(TTACTAGA)*x1, RBS*x1) { emit(gene_1); } // @span: 1032..1734 (+)
+// REGULATORY_EDGE gene_0 ? gene_1 [motif=GATATATATATC*x1; effect=unknown]
+// REGULATORY_EDGE gene_1 ? gene_0 [motif=GATATATATATC*x3; effect=unknown]
+// CANDIDATE_OPERATOR_SITE gene_0 motif=GATATATATATC span=84..96 strand=+
+// CANDIDATE_OPERATOR_SITE gene_0 motif=GATATATATATC span=96..108 strand=+
+// CANDIDATE_OPERATOR_SITE gene_0 motif=GATATATATATC span=108..120 strand=+
+scope_0_loops [LATCH]: if (promoter_sigma70*x1, RBS*x1) { emit(gene_0); } // @span: 182..884 (+) [CANDIDATE_OPERATOR_SITES: GATATATATATC*x3] [CANDIDATE_CIS_EDGES: operator_site(GATATATATATC*x3) -> gene_0 [regulator=unknown, effect=unknown]] [UNLINKED_OPERATOR_LOCKS: !lock_0(GATATATATATC*x3)]
+// CANDIDATE_OPERATOR_SITE gene_1 motif=GATATATATATC span=959..971 strand=+
+scope_1: if (promoter_sigma70*x1, RBS*x1) { emit(gene_1); } // @span: 1048..1750 (+) [CANDIDATE_OPERATOR_SITES: GATATATATATC*x1] [CANDIDATE_CIS_EDGES: operator_site(GATATATATATC*x1) -> gene_1 [regulator=unknown, effect=unknown]] [UNLINKED_OPERATOR_LOCKS: !lock_0(GATATATATATC*x1)]
 ```
 
 #### Python-Style Output (`--emit python`)
 ```python
 # Trans-decompiled by dnadec from fixtures/toggle_switch.fasta
+# REGULATORY_EDGE gene_0 ? gene_1 [motif=GATATATATATC*x1; effect=unknown]
+# REGULATORY_EDGE gene_1 ? gene_0 [motif=GATATATATATC*x3; effect=unknown]
 while circuit_active:  # scope_0_loops [LATCH]
-    if promoter_sigma70 and not lock_TCCCTATC >= 3 and rbs:  # @span: 170..872 (+)
+# CANDIDATE_OPERATOR_SITE gene_0 motif=GATATATATATC span=84..96 strand=+
+# CANDIDATE_OPERATOR_SITE gene_0 motif=GATATATATATC span=96..108 strand=+
+# CANDIDATE_OPERATOR_SITE gene_0 motif=GATATATATATC span=108..120 strand=+
+    if promoter_sigma70 and rbs:  # @span: 182..884 (+)
+    # CANDIDATE_OPERATOR_SITES: GATATATATATC*x3
+    # CANDIDATE_CIS_EDGES: operator_site(GATATATATATC*x3) -> gene_0 [regulator=unknown, effect=unknown]
+    # UNLINKED_OPERATOR_LOCKS: !lock_0(GATATATATATC*x3)
         gene_0 = emit("gene_0")
-    if promoter_sigma70 and not lock_TTACTAGA >= 1 and rbs:  # @span: 1032..1734 (+)
+# CANDIDATE_OPERATOR_SITE gene_1 motif=GATATATATATC span=959..971 strand=+
+    if promoter_sigma70 and rbs:  # @span: 1048..1750 (+)
+    # CANDIDATE_OPERATOR_SITES: GATATATATATC*x1
+    # CANDIDATE_CIS_EDGES: operator_site(GATATATATATC*x1) -> gene_1 [regulator=unknown, effect=unknown]
+    # UNLINKED_OPERATOR_LOCKS: !lock_0(GATATATATATC*x1)
         gene_1 = emit("gene_1")
 ```
 
 #### Verilog-Style Output (`--emit verilog`)
 ```verilog
 // Trans-decompiled by dnadec from fixtures/toggle_switch.fasta
-assign gene_0 = promoter_sigma70 & ~(lock_TCCCTATC_x3) & rbs; // @span: 170..872 (+) // latch feedback
-assign gene_1 = promoter_sigma70 & ~(lock_TTACTAGA_x1) & rbs; // @span: 1032..1734 (+)
+// REGULATORY_EDGE gene_0 ? gene_1 [motif=GATATATATATC*x1; effect=unknown]
+// REGULATORY_EDGE gene_1 ? gene_0 [motif=GATATATATATC*x3; effect=unknown]
+// CANDIDATE_OPERATOR_SITE gene_0 motif=GATATATATATC span=84..96 strand=+
+// CANDIDATE_OPERATOR_SITE gene_0 motif=GATATATATATC span=96..108 strand=+
+// CANDIDATE_OPERATOR_SITE gene_0 motif=GATATATATATC span=108..120 strand=+
+assign gene_0 = promoter_sigma70 & rbs; // @span: 182..884 (+) // latch feedback
+// CANDIDATE_OPERATOR_SITES gene_0: GATATATATATC*x3
+// CANDIDATE_CIS_EDGES: operator_site(GATATATATATC*x3) -> gene_0 [regulator=unknown, effect=unknown]
+// UNLINKED_OPERATOR_LOCKS: !lock_0(GATATATATATC*x3)
+// CANDIDATE_OPERATOR_SITE gene_1 motif=GATATATATATC span=959..971 strand=+
+assign gene_1 = promoter_sigma70 & rbs; // @span: 1048..1750 (+)
+// CANDIDATE_OPERATOR_SITES gene_1: GATATATATATC*x1
+// CANDIDATE_CIS_EDGES: operator_site(GATATATATATC*x1) -> gene_1 [regulator=unknown, effect=unknown]
+// UNLINKED_OPERATOR_LOCKS: !lock_0(GATATATATATC*x1)
 ```
+
 ---
 
 # III. Emergent Circuit Logic
 
-- **Implicit Boolean Conjunction (`AND`) and Steric Negation (`NOT`):** Dependencies surviving the sequence gates within the same 5' CSR slice form a conjunction (`AND`), while candidate operator palindromes emit as steric `!lock(...)` guards.
-- **Spatial Tandem Repeat Compression:** Identical adjacent operator hits within `35 bp` collapse into a single multiplicity term (`!lock(TCCCTATC)*x3`), while separated sites remain distinct entries.
-- **Feedback Cycle Quarantine (`[LATCH]`):** During Pass 2's backward depth-first traversal, an `active_path` recursion stack detects bidirectional feedback cycles and isolates them into `scope_0_loops [LATCH]`.
+- **Implicit Boolean Conjunction (`AND`) with Honest Operator Abstention:** Verified cis-initiation dependencies surviving the sequence gates within the same 5' CSR slice form a conjunction (`AND` / `&`), whereas unlinked operator palindromes (`CANDIDATE_OPERATOR_SITES`, `CANDIDATE_CIS_EDGES`, `UNLINKED_OPERATOR_LOCKS`) are emitted as explicit metadata annotations rather than unverified boolean `NOT` gates.
+- **Spatial Tandem Repeat Compression:** Identical adjacent operator hits within `35 bp` collapse into a single multiplicity term (`GATATATATATC*x3` / `!lock_0(GATATATATATC*x3)`), while separated sites remain distinct entries.
+- **Feedback Cycle Quarantine (`[LATCH]`):** During Pass 2's backward depth-first traversal, an `active_path` recursion stack detects bidirectional feedback cycles (`gene_0 ? gene_1` and `gene_1 ? gene_0`) and isolates them into `scope_0_loops [LATCH]`.
 - **Operon & Coupling Propagation:** Downstream callbacks inside polycistronic transcripts sharing one upstream promoter and one downstream terminator emit clean `if (RBS*x1)` or `if (coupled(gene_0))` guards without requiring internal promoters.
-
 ---
 
 # IV. Benchmarks, Scaling, and Usage
@@ -100,7 +140,7 @@ Built in pure Rust `std` with zero external dependencies, `dnadec` is evaluated 
 ### Quick Start
 
 ```bash
-git clone https://github.com/umayl/dnadec.git
+git clone https://github.com
 cd dnadec
 cargo build --release
 
@@ -122,6 +162,7 @@ python benchmarks/regulondb_eval.py
 # Permit Rho-terminated or partial contigs with inline warnings
 ./target/release/dnadec wild_contig.fasta --non-strict
 ```
+
 ---
 
 # V. Biological Boundaries and Future Work
@@ -129,7 +170,7 @@ python benchmarks/regulondb_eval.py
 Because `dnadec` relies strictly on 1D sequence-intrinsic rules without external proteome context, clear physical boundaries define its current scope:
 
 - **Protein-Assisted & Non-Canonical Regulation:** Wild bacterial operons relying on external activator proteins (`CRP`, `AraC`) to rescue weak `-35` boxes, non-Shine–Dalgarno initiation, or **Rho helicase** termination without a hairpin cannot be resolved from 1D sequence geometry alone.
-- **Trans-Acting Repressor Identity:** While `dnadec` identifies inverted-repeat operator candidates (`!lock(...)`), linking an unannotated palindrome to a trans-acting repressor encoded elsewhere on the chromosome—or determining activation vs. repression sign—cannot be established from a 1D DNA palindrome alone; unknown sites remain isolated as unlinked `!lock_N` guards.
+- **Trans-Acting Repressor Identity:** While `dnadec` identifies inverted-repeat operator candidates (`CANDIDATE_OPERATOR_SITES`, `UNLINKED_OPERATOR_LOCKS`), linking an unannotated palindrome to a trans-acting repressor encoded elsewhere on the chromosome—or determining activation vs. repression sign (`effect=unknown`)—cannot be established from a 1D DNA palindrome alone; unknown sites remain isolated as unlinked `!lock_N(...)` annotations rather than assumed boolean `NOT` gates.
 - **Analytical Null Calibration:** Replacing the `10`-sample Monte Carlo dinucleotide shuffle with an exact first-order Markov transition expectation (`4×4` dinucleotide matrix) is a natural next step to eliminate sampling variance and cut full-genome runtime to under a second.
 - **Prokaryotic Scope:** Eukaryotic genomes—characterized by intron splicing, chromatin accessibility, and distal enhancers—fall outside linear prokaryotic coordinate scanning.
 
